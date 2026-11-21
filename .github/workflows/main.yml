@@ -1,0 +1,106 @@
+name: Build iOS (unsigned IPA)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create iOS project from the web app
+        run: |
+          set -e
+          echo "Repo tree:"; find . -not -path './.git/*' -not -path './.git' | head -60
+          for pass in 1 2 3; do
+            find . -name '*.zip' -not -path './.git/*' -not -path './_ios/*' | while IFS= read -r z; do
+              d="${z%.zip}_unz"
+              if [ ! -d "$d" ]; then echo "Unzipping $z"; unzip -oq "$z" -d "$d" || true; fi
+            done
+          done
+          W=$(find . -name index.html -not -path '*/node_modules/*' -not -path './.git/*' -not -path './_ios/*' -not -path '*/__MACOSX/*' | awk '{print length, $0}' | sort -n | head -1 | cut -d' ' -f2-)
+          if [ -z "$W" ]; then echo "index.html not found. Repo tree:"; find . -not -path './.git/*' | head -80; exit 1; fi
+          WEB=$(dirname "$W")
+          echo "Web folder: $WEB"
+          rm -rf _ios && mkdir -p _ios/www _ios/resources
+          cp -R "$WEB/." _ios/www/
+          cd _ios
+          cat > package.json <<'EOF'
+          {
+            "name": "jannat-alquran-ios",
+            "version": "1.0.0",
+            "private": true,
+            "dependencies": {
+              "@capacitor/core": "^6.0.0",
+              "@capacitor/ios": "^6.0.0"
+            },
+            "devDependencies": {
+              "@capacitor/cli": "^6.0.0",
+              "@capacitor/assets": "^3.0.5"
+            }
+          }
+          EOF
+          cat > capacitor.config.json <<'EOF'
+          {
+            "appId": "com.jannatalquran.app",
+            "appName": "جنة القرآن",
+            "webDir": "www",
+            "ios": { "contentInset": "never", "backgroundColor": "#f1e6c8" }
+          }
+          EOF
+          ICON=www/icon-maskable-512.png
+          [ -f "$ICON" ] || ICON=www/icon-512.png
+          if [ -f "$ICON" ]; then
+            cp "$ICON" resources/icon-only.png
+            sips -z 1024 1024 resources/icon-only.png
+            cp resources/icon-only.png resources/splash.png
+            sips --padToHeightWidth 2732 2732 --padColor 1B5642 resources/splash.png
+            cp resources/splash.png resources/splash-dark.png
+          fi
+          ls -la . www resources | head -60
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        working-directory: _ios
+        run: npm install
+
+      - name: Add iOS platform
+        working-directory: _ios
+        run: npx cap add ios
+
+      - name: Generate icons and splash (continues on failure)
+        working-directory: _ios
+        run: npx capacitor-assets generate --ios || echo "assets generation skipped"
+
+      - name: Sync web files
+        working-directory: _ios
+        run: npx cap sync ios
+
+      - name: Build (no code signing)
+        working-directory: _ios/ios/App
+        run: |
+          xcodebuild archive \
+            -workspace App.xcworkspace \
+            -scheme App \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$PWD/build/App.xcarchive" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=""
+
+      - name: Package IPA
+        run: |
+          mkdir -p Payload
+          cp -R _ios/ios/App/build/App.xcarchive/Products/Applications/App.app Payload/
+          zip -qr JannatAlQuran.ipa Payload
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: JannatAlQuran-unsigned-ipa
+          path: JannatAlQuran.ipa
